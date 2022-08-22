@@ -95,6 +95,7 @@ struct DeviceDelegateOpenXR::State {
   std::vector<const XrCompositionLayerBaseHeader*> frameEndLayers;
   std::function<void()> controllersReadyCallback;
   std::optional<XrPosef> firstPose;
+  bool handTrackingSupported = false;
 
   void Initialize() {
     vrb::RenderContextPtr localContext = context.lock();
@@ -134,6 +135,15 @@ struct DeviceDelegateOpenXR::State {
     if (OpenXRExtensions::IsExtensionSupported(XR_KHR_COMPOSITION_LAYER_CYLINDER_EXTENSION_NAME)) {
       extensions.push_back(XR_KHR_COMPOSITION_LAYER_CYLINDER_EXTENSION_NAME);
     }
+    if (OpenXRExtensions::IsExtensionSupported(XR_EXT_HAND_TRACKING_EXTENSION_NAME)) {
+        extensions.push_back(XR_EXT_HAND_TRACKING_EXTENSION_NAME);
+        if (OpenXRExtensions::IsExtensionSupported(XR_FB_HAND_TRACKING_MESH_EXTENSION_NAME)) {
+            extensions.push_back(XR_FB_HAND_TRACKING_MESH_EXTENSION_NAME);
+        }
+        if (OpenXRExtensions::IsExtensionSupported(XR_FB_HAND_TRACKING_AIM_EXTENSION_NAME)) {
+            extensions.push_back(XR_FB_HAND_TRACKING_AIM_EXTENSION_NAME);
+        }
+    }
 #ifdef OCULUSVR
     if (OpenXRExtensions::IsExtensionSupported(XR_KHR_COMPOSITION_LAYER_EQUIRECT2_EXTENSION_NAME)) {
       extensions.push_back(XR_KHR_COMPOSITION_LAYER_EQUIRECT2_EXTENSION_NAME);
@@ -169,9 +179,20 @@ struct DeviceDelegateOpenXR::State {
     CHECK_XRCMD(xrGetSystem(instance, &systemInfo, &system));
     CHECK_MSG(system != XR_NULL_SYSTEM_ID, "Failed to initialize XRSystem");
 
+    // If hand tracking extension is present, query whether the runtime actually supports it
+    XrSystemHandTrackingPropertiesEXT handTrackingProperties{XR_TYPE_SYSTEM_HAND_TRACKING_PROPERTIES_EXT };
+    handTrackingProperties.supportsHandTracking = XR_FALSE;
+    if (OpenXRExtensions::IsExtensionSupported(XR_EXT_HAND_TRACKING_EXTENSION_NAME)) {
+        handTrackingProperties.next = systemProperties.next;
+        systemProperties.next = &handTrackingProperties;
+    }
+
     // Retrieve system info
     CHECK_XRCMD(xrGetSystemProperties(instance, system, &systemProperties))
     VRB_LOG("OpenXR system name: %s", systemProperties.systemName);
+
+    handTrackingSupported = handTrackingProperties.supportsHandTracking;
+    VRB_LOG("OpenXR runtime %s hand tracking", handTrackingSupported ? "does support" : "doesn't support");
   }
 
   // xrGet*GraphicsRequirementsKHR check must be called prior to xrCreateSession
