@@ -1622,4 +1622,5 @@ the Select` button. When clicked it closes all the previously selected tabs -->
     <string name="external_open_uri_error_no_activity_body">Ingen app hittades för att hantera %1$s</string>
     <string name="voice_search_unsupported">Röstsökning stöds inte för ditt språk.</string>
     <string name="language_service_options_reset">Återställ inställningarna för röstsökningstjänsten</string>
+    <string name="settings_language_galician">Galiciska</string>
 </resources>
