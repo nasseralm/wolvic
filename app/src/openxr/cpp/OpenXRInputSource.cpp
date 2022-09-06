@@ -1,4 +1,5 @@
 #include "OpenXRInputSource.h"
+#include "OpenXRExtensions.h"
 #include <unordered_set>
 
 namespace crow {
@@ -32,6 +33,8 @@ OpenXRInputSource::~OpenXRInputSource()
         xrDestroySpace(mGripSpace);
     if (mPointerSpace != XR_NULL_HANDLE)
         xrDestroySpace(mPointerSpace);
+    if (mHandTracker != XR_NULL_HANDLE)
+        OpenXRExtensions::sXrDestroyHandTrackerEXT(mHandTracker);
 }
 
 XrResult OpenXRInputSource::Initialize()
@@ -89,6 +92,60 @@ XrResult OpenXRInputSource::Initialize()
           RETURN_IF_XR_FAILED(mActionSet.GetOrCreateAction(XR_ACTION_TYPE_FLOAT_INPUT, name, static_cast<OpenXRHandFlags>(item.second), axisAction));
         }
         mAxisActions.emplace(item.first, axisAction);
+    }
+
+    // Initialize hand tracker and mesh
+    if (OpenXRExtensions::IsExtensionSupported(XR_EXT_HAND_TRACKING_EXTENSION_NAME) &&
+            OpenXRExtensions::sXrCreateHandTrackerEXT != nullptr) {
+        XrHandTrackerCreateInfoEXT handTrackerInfo{XR_TYPE_HAND_TRACKER_CREATE_INFO_EXT};
+        handTrackerInfo.hand =
+                mHandeness == OpenXRHandFlags::Right ? XR_HAND_RIGHT_EXT : XR_HAND_LEFT_EXT;
+        handTrackerInfo.handJointSet = XR_HAND_JOINT_SET_DEFAULT_EXT;
+
+        RETURN_IF_XR_FAILED(OpenXRExtensions::sXrCreateHandTrackerEXT(mSession, &handTrackerInfo,
+                                                                      &mHandTracker));
+
+        if (OpenXRExtensions::IsExtensionSupported(XR_FB_HAND_TRACKING_MESH_EXTENSION_NAME)) {
+            XrHandTrackingMeshFB mesh = { XR_TYPE_HAND_TRACKING_MESH_FB };
+            // Figure out sizes first
+            mesh.jointCapacityInput = 0;
+            mesh.vertexCapacityInput = 0;
+            mesh.indexCapacityInput = 0;
+            CHECK_XRCMD(OpenXRExtensions::sXrGetHandMeshFB(mHandTracker, &mesh));
+            mesh.jointCapacityInput = mesh.jointCountOutput;
+            mesh.vertexCapacityInput = mesh.vertexCountOutput;
+            mesh.indexCapacityInput = mesh.indexCountOutput;
+
+            // Skeleton
+            mHandMesh.jointCount = mesh.jointCountOutput;
+            mHandMesh.jointPoses.resize(mesh.jointCountOutput);
+            mHandMesh.jointParents.resize(mesh.jointCountOutput);
+            mHandMesh.jointRadii.resize(mesh.jointCountOutput);
+            mesh.jointBindPoses = mHandMesh.jointPoses.data();
+            mesh.jointParents = mHandMesh.jointParents.data();
+            mesh.jointRadii = mHandMesh.jointRadii.data();
+            // Vertex
+            mHandMesh.vertexCount = mesh.vertexCountOutput;
+            mHandMesh.vertexPositions.resize(mesh.vertexCountOutput);
+            mHandMesh.vertexNormals.resize(mesh.vertexCountOutput);
+            mHandMesh.vertexUVs.resize(mesh.vertexCountOutput);
+            mHandMesh.vertexBlendIndices.resize(mesh.vertexCountOutput);
+            mHandMesh.vertexBlendWeights.resize(mesh.vertexCountOutput);
+            mesh.vertexPositions = mHandMesh.vertexPositions.data();
+            mesh.vertexNormals = mHandMesh.vertexNormals.data();
+            mesh.vertexUVs = mHandMesh.vertexUVs.data();
+            mesh.vertexBlendIndices = mHandMesh.vertexBlendIndices.data();
+            mesh.vertexBlendWeights = mHandMesh.vertexBlendWeights.data();
+            // Index
+            mHandMesh.indexCount = mesh.indexCountOutput;
+            mHandMesh.indices.resize(mesh.indexCountOutput);
+            mesh.indices = mHandMesh.indices.data();
+
+            // Now get the actual mesh
+            RETURN_IF_XR_FAILED(OpenXRExtensions::sXrGetHandMeshFB(mHandTracker, &mesh));
+            hasHandMesh = true;
+            VRB_LOG("xrGetHandMeshFB: %u, %u, %u", mHandMesh.jointCount, mHandMesh.vertexCount, mHandMesh.indexCount);
+        }
     }
 
     return XR_SUCCESS;
@@ -420,8 +477,46 @@ void OpenXRInputSource::UpdateHaptics(ControllerDelegate &delegate)
     CHECK_XRCMD(applyHapticFeedback(mHapticAction, duration, XR_FREQUENCY_UNSPECIFIED, pulseIntensity));
 }
 
+bool OpenXRInputSource::GetHandLocations(const XrFrameState& frameState, XrSpace localSpace) {
+    if (OpenXRExtensions::IsExtensionSupported(XR_EXT_HAND_TRACKING_EXTENSION_NAME) &&
+            OpenXRExtensions::sXrLocateHandJointsEXT != XR_NULL_HANDLE) {
+        // Update hand locations
+        XrHandJointsLocateInfoEXT locateInfo{XR_TYPE_HAND_JOINTS_LOCATE_INFO_EXT };
+        locateInfo.baseSpace = localSpace;
+        locateInfo.time = frameState.predictedDisplayTime;
+
+        XrHandJointLocationsEXT jointLocations;
+        jointLocations.jointCount = XR_HAND_JOINT_COUNT_EXT;
+        jointLocations.jointLocations = mHandLocations.data();
+
+        mAimState.status = 0;
+        if (OpenXRExtensions::IsExtensionSupported(XR_FB_HAND_TRACKING_AIM_EXTENSION_NAME)) {
+            mAimState.next = jointLocations.next;
+            jointLocations.next = &mAimState;
+        }
+
+        CHECK_XRCMD(OpenXRExtensions::sXrLocateHandJointsEXT(mHandTracker, &locateInfo, &jointLocations));
+        hasHandLocation = jointLocations.isActive;
+        hasAimState = (mAimState.status & XR_HAND_TRACKING_AIM_VALID_BIT_FB) != 0;
+
+        return hasHandLocation;
+    } else {
+        return false;
+    }
+}
+
 void OpenXRInputSource::Update(const XrFrameState& frameState, XrSpace localSpace, const vrb::Matrix& head, float offsetY, device::RenderMode renderMode, ControllerDelegate& delegate)
 {
+    // Get hand joint locations and aim state (if supported)
+    if (GetHandLocations(frameState, localSpace)) {
+        // @TODO
+
+
+        // We either have hands or controllers, not both
+        delegate.SetEnabled(mIndex, false);
+        return;
+    }
+
     if (!mActiveMapping) {
       delegate.SetEnabled(mIndex, false);
       return;
